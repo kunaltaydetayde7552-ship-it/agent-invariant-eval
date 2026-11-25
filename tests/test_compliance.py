@@ -19,10 +19,12 @@ from agent_eval.invariants import (
     luhn_valid,
     mask_pci,
     mask_pii,
+    verhoeff_checksum_valid,
 )
 from agent_eval.invariants.compliance import aba_checksum_valid, shannon_entropy
 
 TEST_PAN = "4111111111111111"  # well known Luhn valid test number
+TEST_AADHAAR = "234567890124"  # Verhoeff valid 12-digit test number
 
 
 def tool_span(output, *, input=None, name="ledger.get_transaction") -> Span:  # noqa: A002
@@ -143,6 +145,133 @@ def test_bare_checksum_valid_number_needs_routing_context_by_default():
     trajectory = Trajectory(final_output="entry 011000015")
     assert assert_no_pii().evaluate(trajectory).passed is True
     assert assert_no_pii(require_routing_context=False).evaluate(trajectory).passed is False
+
+
+@pytest.mark.parametrize(
+    "digits",
+    [TEST_AADHAAR, "999988887779", "412345678902", "234555678900"],
+)
+def test_verhoeff_checksum_accepts_valid_aadhaar_numbers(digits):
+    assert verhoeff_checksum_valid(digits)
+
+
+def test_verhoeff_checksum_rejects_errors_and_invalid_formats():
+    # Every 11-digit prefix >= 2 has a unique valid Verhoeff check digit.
+    for prefix in ("20000000000", "31415926535", "98765432109"):
+        valid_digits = [d for d in "0123456789" if verhoeff_checksum_valid(prefix + d)]
+        assert len(valid_digits) == 1
+
+    # All single-digit errors are caught.
+    for pos in range(12):
+        for digit in "0123456789":
+            if digit != TEST_AADHAAR[pos]:
+                mutated = TEST_AADHAAR[:pos] + digit + TEST_AADHAAR[pos + 1 :]
+                assert not verhoeff_checksum_valid(mutated)
+
+    # All adjacent transpositions of distinct digits are caught.
+    for sample in (TEST_AADHAAR, "999988887779"):
+        for pos in range(11):
+            if sample[pos] != sample[pos + 1]:
+                swapped = sample[:pos] + sample[pos + 1] + sample[pos] + sample[pos + 2 :]
+                assert not verhoeff_checksum_valid(swapped)
+
+    # Twin errors caught by Verhoeff.
+    assert not verhoeff_checksum_valid("911988887779")
+    assert not verhoeff_checksum_valid("999933887779")
+    assert not verhoeff_checksum_valid("234566678900")
+
+    # Leading 0 or 1 rejected even when mathematically Verhoeff-valid.
+    for invalid in (
+        "012345678906",
+        "112345678907",
+        "",
+        "23456789012",
+        "2345678901240",
+        "2345 6789 0124",
+        "23456789012a",
+        "23456789012²",
+        "٢34567890124",
+    ):
+        assert not verhoeff_checksum_valid(invalid), invalid
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        f"aadhaar {TEST_AADHAAR}",
+        "Aadhaar: 2345 6789 0124",
+        "UIDAI 2345-6789-0124",
+        "aadhar_number: 234567890124",
+        "user_uid=2345 6789 0124",
+        f"Aadhaar.{TEST_AADHAAR}.",
+    ],
+)
+def test_aadhaar_detected_in_supported_formats_and_contexts(text):
+    findings = find_pii(text)
+    assert [(f.kind, f.masked) for f in findings] == [("aadhaar", "********0124")]
+    assert find_pci(text) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        f"order {TEST_AADHAAR}",
+        "id 2345 6789 0124",
+        "id 2345-6789-0124",
+        "guid: 234567890124",
+        "uuid: 2345-6789-0124",
+        "aadhaar 2345 6789-0124",  # mixed separators
+        "aadhaar 2345-6789 0124",  # mixed separators
+        "aadhaar 2345.6789.0124",  # unsupported separator
+        "aadhaar 0.234567890124",  # decimal
+        f"aadhaar {TEST_AADHAAR}.5",  # decimal
+        f"aadhaar {TEST_AADHAAR}5",  # 13 digits
+        "aadhaar 012345678906",  # leading 0
+        "aadhaar 1123-4567-8907",  # leading 1
+        "aadhaar 234567890125",  # bad Verhoeff checksum
+    ],
+)
+def test_aadhaar_rejects_uncontexted_mixed_decimals_and_invalid_numbers(text):
+    assert find_pii(text) == []
+
+
+def test_aadhaar_context_toggle_and_masking():
+    assert mask_pii("aadhaar 2345 6789 0124 done") == "aadhaar ********0124 done"
+    assert mask_pii("UID 2345-6789-0124 done") == "UID ********0124 done"
+    masked = mask_pii(f"aadhaar {TEST_AADHAAR}")
+    assert masked == "aadhaar ********0124"
+    assert find_pii(masked) == []
+
+    for bare_fmt in (TEST_AADHAAR, "2345 6789 0124", "2345-6789-0124"):
+        assert find_pii(f"ref {bare_fmt}") == []
+        findings = find_pii(f"ref {bare_fmt}", require_aadhaar_context=False)
+        assert [(f.kind, f.masked) for f in findings] == [("aadhaar", "********0124")]
+        assert mask_pii(f"ref {bare_fmt}", require_aadhaar_context=False) == "ref ********0124"
+
+
+def test_no_pii_trajectory_aadhaar_dict_masking_and_scopes():
+    invariant = assert_no_pii()
+    in_input = Trajectory(input={"aadhaar_number": "2345 6789 0124"})
+    assert invariant.evaluate(in_input, Stage.INPUT).passed is False
+
+    in_tool = Trajectory(spans=[tool_span({"aadhaar_number": int(TEST_AADHAAR)})])
+    result = invariant.evaluate(in_tool)
+    assert result.passed is False
+    assert result.metrics["findings"] == 1.0  # not double-flagged as high-entropy secret
+    assert result.span_ids == [in_tool.spans[0].span_id]
+    assert result.evidence == [
+        "aadhaar in execute_tool ledger.get_transaction output: ********0124"
+    ]
+    assert assert_no_pii(scopes={"input", "output"}).evaluate(in_tool).passed is True
+    assert assert_no_pii(ignore_keys={"aadhaar_number"}).evaluate(in_tool).passed is True
+
+    in_output = Trajectory(final_output="UID: 2345-6789-0124")
+    assert invariant.evaluate(in_output).passed is False
+
+    clean = Trajectory(final_output=f"order {TEST_AADHAAR}")
+    assert invariant.evaluate(clean).passed is True
+    assert assert_no_pii(require_aadhaar_context=False).evaluate(clean).passed is False
+    assert invariant.evaluate(Trajectory(spans=[tool_span({"guid": TEST_AADHAAR})])).passed is True
 
 
 def test_email_detected_and_masked():

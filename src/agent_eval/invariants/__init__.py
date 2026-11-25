@@ -17,6 +17,7 @@ from agent_eval.invariants.compliance import (
     luhn_valid,
     mask_pci,
     mask_pii,
+    verhoeff_checksum_valid,
 )
 from agent_eval.invariants.topology import (
     NoContextBloat,
@@ -85,4 +86,5 @@ __all__ = [
     "luhn_valid",
     "mask_pci",
     "mask_pii",
+    "verhoeff_checksum_valid",
 ]

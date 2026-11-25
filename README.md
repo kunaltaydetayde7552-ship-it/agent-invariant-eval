@@ -195,7 +195,7 @@ Anything other than a clean, explicit pass is a failure:
 
 | Name | Factory | Stages | What it asserts |
 |---|---|---|---|
-| `no_pii` | `assert_no_pii()` | input, span, output | No SSN, ABA routing number, email or high entropy secret in any payload |
+| `no_pii` | `assert_no_pii()` | input, span, output | No SSN, ABA routing number, Aadhaar number, email or high entropy secret in any payload |
 | `pci_compliant` | `assert_pci_compliant()` | input, span, output | No Luhn valid PAN (13 to 19 digits) and no CVV pattern |
 | `numeric_grounding` | `assert_numeric_grounding()` | output | Every monetary figure in the answer exists in a tool output |
 | `sla_bounds` | `assert_sla_bounds(max_latency_ms, max_tokens)` | span, output | Latency and token budgets |
@@ -212,6 +212,11 @@ Detection details:
   and a routing keyword (routing, ABA, RTN) just before it. One in ten random nine digit ids
   passes the checksum alone, so the keyword is required by default. Use
   `assert_no_pii(require_routing_context=False)` to flag on the checksum alone.
+* **Aadhaar number.** Twelve digits starting with `2` through `9` (bare, space separated, or
+  hyphen separated) validated by `verhoeff_checksum_valid`, and an Aadhaar keyword (`aadhaar`,
+  `aadhar`, `uidai`, `uid`) just before it. One in ten random twelve digit numbers passes the
+  checksum alone, so the keyword is required by default. Use
+  `assert_no_pii(require_aadhaar_context=False)` to flag on the checksum alone.
 * **Incremental & pre-execution scanning.** When a span opens with an `input`, `Stage.SPAN`
   invariants run before the `with` block executes (blocking tool side effects on violating inputs).
   When the span closes, only its new payloads are scanned. The final pass scans everything once
@@ -478,8 +483,8 @@ on a routing loop, the frontier table, and the span export to `out/otel_spans.js
   not preempted. Put a transport timeout on the call itself.
 * **Recall is not perfect.** Regex, checksum and entropy detection catches structured
   identifiers. It does not catch names, addresses or free text PII. Luhn has a one in ten
-  false positive rate on random 16 digit numbers. A routing number with no keyword near it is
-  missed by default. Treat these checks as a deterministic floor and not as a DLP product.
+  false positive rate on random 16 digit numbers. A routing or Aadhaar number with no keyword near
+  it is missed by default. Treat these checks as a deterministic floor and not as a DLP product.
 * **Strict grounding.** Exact match only. Rounded or derived amounts fail. A standalone number
   in a tool string (`"id 1001"`) still grounds; use `ground_from_strings=False` to rule that
   out. Currency is not compared. Spelled-out amounts (`"forty two dollars"`) and numbers without a
